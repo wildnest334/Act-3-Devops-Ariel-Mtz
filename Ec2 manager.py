@@ -1,5 +1,5 @@
 import boto3
-import socket
+import urllib.request
 from botocore.exceptions import ClientError, NoCredentialsError
 
 # ─────────────────────────────────────────
@@ -7,22 +7,67 @@ from botocore.exceptions import ClientError, NoCredentialsError
 # ─────────────────────────────────────────
 ALUMNO    = "Ariel Martínez"
 MATRICULA = "Al3005455"
-REGION    = "us-east-1"   # Cambia si tu ambiente usa otra región
+REGION    = "us-east-1"   
 
 # ─────────────────────────────────────────
-#  DETECTAR AMBIENTE SEGÚN HOSTNAME
+#  DETECTAR AMBIENTE VÍA IMDSV2 + TAG
 # ─────────────────────────────────────────
+from typing import Optional
+def get_instance_id() -> Optional[str]:
+    """
+    Consulta el Instance Metadata Service v2 (IMDSv2) para
+    obtener el Instance ID de la EC2 donde corre este script.
+    Retorna None si falla (ej. ejecución local fuera de AWS).
+    """
+    try:
+        # Paso 1: obtener token de sesión IMDSv2
+        token_req = urllib.request.Request(
+            "http://169.254.169.254/latest/api/token",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
+            method="PUT"
+        )
+        with urllib.request.urlopen(token_req, timeout=2) as r:
+            token = r.read().decode()
+
+        # Paso 2: usar el token para leer el instance-id
+        meta_req = urllib.request.Request(
+            "http://169.254.169.254/latest/meta-data/instance-id",
+            headers={"X-aws-ec2-metadata-token": token}
+        )
+        with urllib.request.urlopen(meta_req, timeout=2) as r:
+            return r.read().decode()
+    except Exception:
+        return None
+
+
 def detectar_ambiente() -> tuple[str, str]:
     """
-    Lee el hostname de la máquina actual.
-    Si contiene 'prod' → Producción / Production
-    Cualquier otro caso → Desarrollo / Development
-    Retorna (nombre_display, tag_value)
+    Obtiene el tag 'Environment' de la propia instancia usando su ID real.
+    Mapeo:
+      Production  → ("Producción",  "Production")
+      Development → ("Desarrollo",  "Development")
+      (cualquier otro / fallo) → ("Desarrollo", "Development")  ← fallback seguro
     """
-    hostname = socket.gethostname().lower()
-    if "prod" in hostname:
-        return "Producción", "Production"
+    instance_id = get_instance_id()
+    if instance_id:
+        try:
+            ec2 = boto3.client("ec2", region_name=REGION)
+            resp = ec2.describe_instances(InstanceIds=[instance_id])
+            tags = resp["Reservations"][0]["Instances"][0].get("Tags", [])
+            env_tag = next(
+                (t["Value"] for t in tags if t["Key"] == "Environment"), None
+            )
+            if env_tag and env_tag.lower() == "production":
+                return "Producción", "Production"
+            if env_tag and env_tag.lower() == "development":
+                return "Desarrollo", "Development"
+        except Exception:
+            pass  # Si falla cualquier paso, usa el fallback
+
+    # Fallback: no estamos en AWS o no hay tag → asumimos Desarrollo
+    print("[AVISO] No se pudo detectar el ambiente automáticamente. Usando 'Desarrollo'.")
     return "Desarrollo", "Development"
+
 
 AMBIENTE_DISPLAY, AMBIENTE_TAG = detectar_ambiente()
 
@@ -140,7 +185,7 @@ def iniciar_instancia(ec2):
 
     try:
         ec2.start_instances(InstanceIds=[instance_id])
-        print(f"\n  ✅ Instancia {instance_id} enviada a iniciar.")
+        print(f"\n   Instancia {instance_id} enviada a iniciar.")
     except ClientError as e:
         print(f"\n  [ERROR] {e.response['Error']['Message']}")
 
@@ -160,7 +205,7 @@ def detener_instancia(ec2):
 
     try:
         ec2.stop_instances(InstanceIds=[instance_id])
-        print(f"\n  ⛔ Instancia {instance_id} enviada a detener.")
+        print(f"\n   Instancia {instance_id} enviada a detener.")
     except ClientError as e:
         print(f"\n  [ERROR] {e.response['Error']['Message']}")
 
@@ -180,7 +225,7 @@ def reiniciar_instancia(ec2):
 
     try:
         ec2.reboot_instances(InstanceIds=[instance_id])
-        print(f"\n  🔄 Instancia {instance_id} enviada a reiniciar.")
+        print(f"\n   Instancia {instance_id} enviada a reiniciar.")
     except ClientError as e:
         print(f"\n  [ERROR] {e.response['Error']['Message']}")
 
@@ -204,7 +249,7 @@ def main():
             reiniciar_instancia(ec2)
         elif opcion == "5":
             mostrar_encabezado()
-            print("  Hasta luego 👋")
+            print("  Hasta luego ")
             print("========================================\n")
             break
         else:
